@@ -80,7 +80,16 @@ export async function moveDay(input: {
   dayId: number;
   direction: "up" | "down";
 }): Promise<Result> {
-  const [day] = await db.select().from(days).where(eq(days.id, input.dayId)).limit(1);
+  const session = await auth();
+  if (!session?.user?.id) return { ok: false, error: "Not authenticated" };
+
+  // verify the day belongs to the current user (join through mesocycle)
+  const [day] = await db
+    .select({ id: days.id, mesocycleId: days.mesocycleId, dayOrder: days.dayOrder })
+    .from(days)
+    .innerJoin(mesocycles, eq(mesocycles.id, days.mesocycleId))
+    .where(and(eq(days.id, input.dayId), eq(mesocycles.userId, session.user.id)))
+    .limit(1);
   if (!day) return { ok: false, error: "Day not found." };
 
   // all days in this meso, in order
