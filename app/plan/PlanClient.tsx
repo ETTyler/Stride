@@ -11,7 +11,12 @@ import {
   changeExercise,
 } from "@/lib/actions/plan";
 import { createExercise } from "@/lib/actions/library";
-import { generateFirstWeek, deleteMesocycle } from "@/lib/actions/mesocycle";
+import {
+  generateFirstWeek,
+  deleteMesocycle,
+  setMesocycleStatus,
+  duplicateMesocycle,
+} from "@/lib/actions/mesocycle";
 import AdvanceWeekButton from "@/app/components/AdvanceWeekButton";
 import type { MesoPlan, MesoWeekStatus } from "@/lib/db/queries";
 import {
@@ -230,18 +235,65 @@ function MesoBuilder({
         <div style={{ ...card, marginTop: 12 }}>
           <div style={{ fontSize: 13, color: CHALK_DIM, marginBottom: 10 }}>
             Week {status.weeksGenerated} of {status.totalWeeks} generated
-            {status.currentWeekComplete ? " · current week complete" : " · in progress"}
+            {plan.meso.status === "complete"
+              ? " · marked complete"
+              : status.currentWeekComplete
+              ? " · current week complete"
+              : " · in progress"}
           </div>
-          {status.nextWeekToGenerate != null ? (
-            <AdvanceWeekButton mesocycleId={plan.meso.id} nextWeek={status.nextWeekToGenerate} />
-          ) : status.mesoComplete ? (
-            <p style={{ margin: 0, color: GREEN, fontSize: 14, fontWeight: 700 }}>
-              Mesocycle complete 🎉
-            </p>
+
+          {plan.meso.status === "complete" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <p style={{ margin: 0, color: GREEN, fontSize: 14, fontWeight: 700 }}>
+                Mesocycle complete 🎉
+              </p>
+              <button
+                onClick={() =>
+                  run(() => duplicateMesocycle(plan.meso.id), () => router.push("/plan"))
+                }
+                disabled={pending}
+                style={{ ...primaryBtn, marginTop: 0 }}
+              >
+                {pending ? "Working…" : "Start next mesocycle (carry over plan) →"}
+              </button>
+              <button
+                onClick={() => run(() => setMesocycleStatus(plan.meso.id, "active"))}
+                disabled={pending}
+                style={ghostBtn}
+              >
+                Reactivate
+              </button>
+            </div>
           ) : (
-            <Link href="/workout" style={{ ...primaryBtnLink }}>
-              Go to today&apos;s workout →
-            </Link>
+            <>
+              {status.nextWeekToGenerate != null ? (
+                <AdvanceWeekButton mesocycleId={plan.meso.id} nextWeek={status.nextWeekToGenerate} />
+              ) : status.mesoComplete ? (
+                <p style={{ margin: 0, color: CHALK_DIM, fontSize: 13 }}>
+                  All weeks logged — mark it complete below to wrap up and start your next block.
+                </p>
+              ) : (
+                <Link href="/workout" style={{ ...primaryBtnLink }}>
+                  Go to today&apos;s workout →
+                </Link>
+              )}
+              <button
+                onClick={() => {
+                  if (
+                    confirm(
+                      status.mesoComplete
+                        ? "Mark this mesocycle complete?"
+                        : "Mark this mesocycle complete now, before all weeks are done?"
+                    )
+                  )
+                    run(() => setMesocycleStatus(plan.meso.id, "complete"));
+                }}
+                disabled={pending}
+                style={{ ...ghostBtn, marginTop: 10 }}
+              >
+                Mark mesocycle complete
+              </button>
+            </>
           )}
         </div>
       )}
@@ -267,6 +319,9 @@ function MesoBuilder({
                         <span style={{ fontWeight: 600 }}>{ex.name}</span>
                         <span style={{ color: ACCENT, fontSize: 12, marginLeft: 8 }}>
                           {ex.primaryMuscle}
+                        </span>
+                        <span style={{ color: CHALK_DIM, fontSize: 11, marginLeft: 8 }}>
+                          {ex.goalSets != null ? `${ex.goalSets} sets` : "auto sets"}
                         </span>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -423,6 +478,10 @@ function AddExercisePicker({
   );
   const [sel, setSel] = useState<number | "">("");
 
+  // optional goal working sets (blank = let the algorithm decide)
+  const [goal, setGoal] = useState("");
+  const goalSets = goal.trim() === "" ? null : Number(goal);
+
   // new-exercise fields
   const [name, setName] = useState("");
   const [primaryId, setPrimaryId] = useState<number | "">(muscles[0]?.id ?? "");
@@ -433,7 +492,10 @@ function AddExercisePicker({
   function addExisting() {
     if (sel === "") return;
     const exerciseId = Number(sel);
-    run(() => addExerciseToDay({ dayId, exerciseId }), () => setSel(""));
+    run(() => addExerciseToDay({ dayId, exerciseId, goalSets }), () => {
+      setSel("");
+      setGoal("");
+    });
   }
 
   function addNew() {
@@ -448,10 +510,11 @@ function AddExercisePicker({
           primaryMuscleId: Number(primaryId),
         });
         if (!created.ok) return created;
-        return addExerciseToDay({ dayId, exerciseId: created.exerciseId });
+        return addExerciseToDay({ dayId, exerciseId: created.exerciseId, goalSets });
       },
       () => {
         setName("");
+        setGoal("");
         setMode("existing");
       }
     );
@@ -499,6 +562,16 @@ function AddExercisePicker({
                 </option>
               ))}
             </select>
+            <input
+              inputMode="numeric"
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              placeholder="Sets"
+              aria-label="Goal working sets (optional)"
+              title="Goal working sets — leave blank to auto-set"
+              style={{ ...input, width: 64, flex: "none", textAlign: "center" }}
+              disabled={pending}
+            />
             <button
               onClick={addExisting}
               disabled={pending || sel === ""}
@@ -539,7 +612,7 @@ function AddExercisePicker({
             ))}
           </select>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
             <div>
               <label style={lbl}>Rep low</label>
               <input
@@ -561,11 +634,23 @@ function AddExercisePicker({
               />
             </div>
             <div>
-              <label style={lbl}>Load step (kg)</label>
+              <label style={lbl}>Load step</label>
               <input
                 inputMode="decimal"
                 value={loadStep}
                 onChange={(e) => setLoadStep(e.target.value)}
+                style={input}
+                disabled={pending}
+              />
+            </div>
+            <div>
+              <label style={lbl}>Goal sets</label>
+              <input
+                inputMode="numeric"
+                value={goal}
+                onChange={(e) => setGoal(e.target.value)}
+                placeholder="auto"
+                title="Goal working sets — leave blank to auto-set"
                 style={input}
                 disabled={pending}
               />

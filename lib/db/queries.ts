@@ -246,6 +246,7 @@ export type MesoPlanDay = {
     name: string;
     primaryMuscle: string;
     order: number;
+    goalSets: number | null;
   }[];
 };
 
@@ -279,6 +280,7 @@ export async function getMesocyclePlan(mesocycleId: number, user_id: string): Pr
           exerciseId: exercises.id,
           name: exercises.name,
           order: dayExercises.exerciseOrder,
+          goalSets: dayExercises.goalSets,
         })
         .from(dayExercises)
         .innerJoin(exercises, eq(exercises.id, dayExercises.exerciseId))
@@ -305,6 +307,7 @@ export async function getMesocyclePlan(mesocycleId: number, user_id: string): Pr
       name: r.name,
       primaryMuscle: primaryByExercise.get(r.exerciseId) ?? "—",
       order: r.order,
+      goalSets: r.goalSets,
     });
     byDay.set(r.dayId, arr);
   }
@@ -377,6 +380,39 @@ export async function getMesoWeekStatus(mesocycleId: number, user_id: string): P
     mesoComplete,
     perWeek,
   };
+}
+
+/**
+ * The user's heaviest completed weight per exercise across all their history.
+ * Used to seed a new mesocycle's week 1 so it isn't blank ("carry over stats").
+ */
+export async function getLastWeightByExercise(
+  userId: string,
+  exerciseIds: number[]
+): Promise<Map<number, number>> {
+  const best = new Map<number, number>();
+  if (!exerciseIds.length) return best;
+
+  const rows = await db
+    .select({ exerciseId: dayExercises.exerciseId, weight: setLogs.weight })
+    .from(setLogs)
+    .innerJoin(dayExercises, eq(dayExercises.id, setLogs.dayExerciseId))
+    .innerJoin(workouts, eq(workouts.id, setLogs.workoutId))
+    .innerJoin(mesocycles, eq(mesocycles.id, workouts.mesocycleId))
+    .where(
+      and(
+        eq(mesocycles.userId, userId),
+        eq(setLogs.completed, true),
+        inArray(dayExercises.exerciseId, exerciseIds)
+      )
+    );
+
+  for (const r of rows) {
+    if (r.weight == null) continue;
+    const cur = best.get(r.exerciseId);
+    if (cur == null || r.weight > cur) best.set(r.exerciseId, r.weight);
+  }
+  return best;
 }
 
 /** Count of completed working sets per muscle group for a given week. */

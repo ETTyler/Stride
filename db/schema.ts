@@ -142,6 +142,9 @@ export const dayExercises = pgTable("day_exercises", {
     .notNull()
     .references(() => exercises.id),
   exerciseOrder: integer("exercise_order").notNull(),
+  // optional user-set target working sets for this exercise.
+  // null = let the progression algorithm decide.
+  goalSets: integer("goal_sets"),
 });
 
 /* ---------- the log ---------- */

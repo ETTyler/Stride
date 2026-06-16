@@ -74,7 +74,13 @@ export async function addDay(input: {
 export async function addExerciseToDay(input: {
   dayId: number;
   exerciseId: number;
+  goalSets?: number | null;
 }): Promise<Result<{ dayExerciseId: number }>> {
+  const goalSets =
+    input.goalSets != null && Number.isFinite(input.goalSets)
+      ? Math.max(1, Math.min(Math.round(input.goalSets), 10))
+      : null;
+
   const [{ value: maxOrder }] = await db
     .select({ value: max(dayExercises.exerciseOrder) })
     .from(dayExercises)
@@ -86,6 +92,7 @@ export async function addExerciseToDay(input: {
       dayId: input.dayId,
       exerciseId: input.exerciseId,
       exerciseOrder: (maxOrder ?? 0) + 1,
+      goalSets,
     })
     .returning();
 
@@ -110,7 +117,8 @@ export async function addExerciseToDay(input: {
       .where(eq(mesocycles.id, wo.mesocycleId))
       .limit(1);
     const rir = targetRirForWeek(wo.weekNumber, meso?.weeks ?? 5);
-    const rows = Array.from({ length: DEFAULT_SETS }, (_, i) => ({
+    const setCount = goalSets ?? DEFAULT_SETS;
+    const rows = Array.from({ length: setCount }, (_, i) => ({
       workoutId: wo.id,
       dayExerciseId: dx.id,
       setNumber: i + 1,

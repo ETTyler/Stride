@@ -14,12 +14,13 @@ import {
 import { and, eq, ne, asc, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
-import { prescribe, type MuscleFeedback } from "@/lib/progression";
+import { prescribe, isDeloadWeek, type MuscleFeedback } from "@/lib/progression";
 import {
   getLastWeekSets,
   getLatestFeedbackByMuscle,
   getMuscleSetCounts,
   getMesoWeekStatus,
+  getLastWeightByExercise,
 } from "@/lib/db/queries";
 
 /**
@@ -46,12 +47,47 @@ export async function generateFirstWeek(mesocycleId: number): Promise<GenResult>
   const existing = await db.select().from(workouts).where(eq(workouts.mesocycleId, mesocycleId));
   if (existing.length) return { ok: false, error: "This mesocycle already has workouts." };
 
+  // Only one meso runs at a time — but we never silently complete another one.
+  // Ask the user to finish/mark their current meso complete first.
+  if (meso.userId) {
+    const [otherActive] = await db
+      .select({ id: mesocycles.id, name: mesocycles.name })
+      .from(mesocycles)
+      .where(
+        and(
+          eq(mesocycles.userId, meso.userId),
+          eq(mesocycles.status, "active"),
+          ne(mesocycles.id, mesocycleId)
+        )
+      )
+      .limit(1);
+    if (otherActive) {
+      return {
+        ok: false,
+        error: `“${otherActive.name}” is still active. Mark it complete before starting a new mesocycle.`,
+      };
+    }
+  }
+
   const dayRows = await db
     .select()
     .from(days)
     .where(eq(days.mesocycleId, mesocycleId))
     .orderBy(asc(days.dayOrder));
   if (!dayRows.length) return { ok: false, error: "Add training days before generating." };
+
+  // Carry over the user's known working weights so week 1 isn't blank.
+  const allExerciseIds = await db
+    .select({ exerciseId: dayExercises.exerciseId })
+    .from(dayExercises)
+    .innerJoin(days, eq(days.id, dayExercises.dayId))
+    .where(eq(days.mesocycleId, mesocycleId));
+  const lastWeights = meso.userId
+    ? await getLastWeightByExercise(
+        meso.userId,
+        allExerciseIds.map((r) => r.exerciseId)
+      )
+    : new Map<number, number>();
 
   let created = 0;
 
@@ -61,6 +97,7 @@ export async function generateFirstWeek(mesocycleId: number): Promise<GenResult>
         id: dayExercises.id,
         exerciseId: dayExercises.exerciseId,
         order: dayExercises.exerciseOrder,
+        goalSets: dayExercises.goalSets,
         repLow: exercises.repRangeLow,
         repHigh: exercises.repRangeHigh,
       })
@@ -74,26 +111,23 @@ export async function generateFirstWeek(mesocycleId: number): Promise<GenResult>
       .values({ mesocycleId, dayId: day.id, weekNumber: 1, status: "upcoming" })
       .returning();
 
-    const rows = dxRows.flatMap((dx) =>
-      Array.from({ length: DEFAULT_STARTING_SETS }, (_, i) => ({
+    const rows = dxRows.flatMap((dx) => {
+      // user goal overrides the default starting volume when set
+      const setCount =
+        dx.goalSets != null ? Math.max(1, Math.min(dx.goalSets, 10)) : DEFAULT_STARTING_SETS;
+      return Array.from({ length: setCount }, (_, i) => ({
         workoutId: workout.id,
         dayExerciseId: dx.id,
         setNumber: i + 1,
         targetReps: dx.repLow, // start at the bottom of the range
         targetRir: 3, // week 1 RIR
-        targetWeight: null, // user picks the first weight
+        targetWeight: lastWeights.get(dx.exerciseId) ?? null, // carried over, or user picks
         completed: false,
-      }))
-    );
+      }));
+    });
     if (rows.length) await db.insert(setLogs).values(rows);
     created++;
   }
-
-  // Only one meso runs at a time: retire any other active meso.
-  await db
-    .update(mesocycles)
-    .set({ status: "complete" })
-    .where(and(eq(mesocycles.status, "active"), ne(mesocycles.id, mesocycleId)));
 
   await db.update(mesocycles).set({ status: "active" }).where(eq(mesocycles.id, mesocycleId));
   revalidatePath("/workout");
@@ -124,6 +158,112 @@ export async function advanceWeek(mesocycleId: number): Promise<GenResult> {
   return res;
 }
 
+/**
+ * Set a meso's status explicitly. The user marks a meso complete here (or
+ * reactivates one). Activating is blocked if another meso is already active.
+ */
+export async function setMesocycleStatus(
+  mesocycleId: number,
+  status: "planned" | "active" | "complete"
+): Promise<Result> {
+  const session = await auth();
+  if (!session?.user?.id) return { ok: false, error: "Not authenticated" };
+
+  const [meso] = await db
+    .select()
+    .from(mesocycles)
+    .where(and(eq(mesocycles.id, mesocycleId), eq(mesocycles.userId, session.user.id)))
+    .limit(1);
+  if (!meso) return { ok: false, error: "Mesocycle not found." };
+
+  if (status === "active") {
+    const [otherActive] = await db
+      .select({ id: mesocycles.id, name: mesocycles.name })
+      .from(mesocycles)
+      .where(
+        and(
+          eq(mesocycles.userId, session.user.id),
+          eq(mesocycles.status, "active"),
+          ne(mesocycles.id, mesocycleId)
+        )
+      )
+      .limit(1);
+    if (otherActive)
+      return {
+        ok: false,
+        error: `“${otherActive.name}” is already active. Mark it complete first.`,
+      };
+  }
+
+  await db.update(mesocycles).set({ status }).where(eq(mesocycles.id, mesocycleId));
+  revalidatePath("/plan");
+  revalidatePath("/");
+  revalidatePath("/workout");
+  return { ok: true };
+}
+
+/**
+ * Copy a meso's plan (days + exercises) into a new "planned" meso, so the user
+ * can start their next block from the previous one. Last-used weights carry over
+ * automatically when the new meso's first week is generated.
+ */
+export async function duplicateMesocycle(
+  mesocycleId: number,
+  name?: string
+): Promise<Result<{ mesocycleId: number }>> {
+  const session = await auth();
+  if (!session?.user?.id) return { ok: false, error: "Not authenticated" };
+
+  const [source] = await db
+    .select()
+    .from(mesocycles)
+    .where(and(eq(mesocycles.id, mesocycleId), eq(mesocycles.userId, session.user.id)))
+    .limit(1);
+  if (!source) return { ok: false, error: "Mesocycle not found." };
+
+  const [copy] = await db
+    .insert(mesocycles)
+    .values({
+      userId: session.user.id,
+      name: name?.trim() || `${source.name} (cont.)`,
+      weeks: source.weeks,
+      status: "planned",
+    })
+    .returning();
+
+  const srcDays = await db
+    .select()
+    .from(days)
+    .where(eq(days.mesocycleId, mesocycleId))
+    .orderBy(asc(days.dayOrder));
+
+  for (const d of srcDays) {
+    const [newDay] = await db
+      .insert(days)
+      .values({ mesocycleId: copy.id, label: d.label, dayOrder: d.dayOrder })
+      .returning();
+
+    const srcDx = await db
+      .select()
+      .from(dayExercises)
+      .where(eq(dayExercises.dayId, d.id))
+      .orderBy(asc(dayExercises.exerciseOrder));
+
+    if (srcDx.length) {
+      await db.insert(dayExercises).values(
+        srcDx.map((dx) => ({
+          dayId: newDay.id,
+          exerciseId: dx.exerciseId,
+          exerciseOrder: dx.exerciseOrder,
+        }))
+      );
+    }
+  }
+
+  revalidatePath("/plan");
+  return { ok: true, mesocycleId: copy.id };
+}
+
 /** Delete a mesocycle (and, via cascade, its days/workouts/sets/feedback). */
 export async function deleteMesocycle(mesocycleId: number): Promise<Result> {
   await db.delete(mesocycles).where(eq(mesocycles.id, mesocycleId));
@@ -133,7 +273,7 @@ export async function deleteMesocycle(mesocycleId: number): Promise<Result> {
   return { ok: true };
 }
 
-type Result = { ok: true } | { ok: false; error: string };
+type Result<T = {}> = ({ ok: true } & T) | { ok: false; error: string };
 
 /**
  * Generate week N (N >= 2) from week N-1. For each exercise on each day, it
@@ -183,6 +323,7 @@ export async function generateNextWeek(
       .select({
         id: dayExercises.id,
         exerciseId: dayExercises.exerciseId,
+        goalSets: dayExercises.goalSets,
         repLow: exercises.repRangeLow,
         repHigh: exercises.repRangeHigh,
         loadStep: exercises.loadStep,
@@ -244,11 +385,18 @@ export async function generateNextWeek(
 
       if (result.recommendDeloadSoon) deloadFlagged = true;
 
-      // engine returns weekly sets for the MUSCLE; this exercise gets its share.
-      // simplest correct distribution: cap this exercise at the prescribed count
-      // (a muscle trained by one exercise/day maps 1:1; multi-exercise days split
-      // is handled by the meso builder, out of scope here — we use the count).
-      const setsForExercise = Math.max(1, result.sets > 0 ? Math.min(result.sets, 5) : 3);
+      // If the user set a goal number of working sets for this exercise, honor
+      // it (halved on the deload week). Otherwise fall back to the algorithm.
+      let setsForExercise: number;
+      if (dx.goalSets != null) {
+        const goal = Math.max(1, Math.min(dx.goalSets, 10));
+        setsForExercise = isDeloadWeek(targetWeek, meso.weeks)
+          ? Math.max(1, Math.round(goal / 2))
+          : goal;
+      } else {
+        // engine returns weekly sets for the MUSCLE; this exercise gets its share.
+        setsForExercise = Math.max(1, result.sets > 0 ? Math.min(result.sets, 5) : 3);
+      }
 
       for (let i = 0; i < setsForExercise; i++) {
         setRows.push({

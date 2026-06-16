@@ -8,6 +8,7 @@ import {
   skipSet,
   saveFeedback,
   finishWorkout,
+  endWorkout,
 } from "@/lib/actions/workout";
 import { addExerciseToDay, changeExercise } from "@/lib/actions/plan";
 
@@ -96,7 +97,23 @@ export default function TodaysWorkout({
           Week {view.weekNumber} of {view.totalWeeks}
           {view.exercises[0]?.targetRir != null && ` · ${view.exercises[0].targetRir} RIR target`}
         </div>
-        <h1 style={pageTitle}>{view.dayLabel}</h1>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+          <h1 style={pageTitle}>{view.dayLabel}</h1>
+          <button
+            onClick={() => {
+              if (
+                confirm(
+                  "End this workout and move to the next day? Any unlogged sets will be cleared and this session marked done."
+                )
+              )
+                run(() => endWorkout({ workoutId: view.workoutId }));
+            }}
+            disabled={pending}
+            style={endBtn}
+          >
+            End workout
+          </button>
+        </div>
         <div style={{ marginTop: 14, height: 4, background: LINE }}>
           <div
             style={{
@@ -626,6 +643,20 @@ const linkBtn: React.CSSProperties = {
   letterSpacing: "0.04em",
   cursor: "pointer",
   padding: 0,
+};
+const endBtn: React.CSSProperties = {
+  flexShrink: 0,
+  background: "transparent",
+  border: `1px solid ${RED}`,
+  color: RED,
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  borderRadius: 4,
+  padding: "7px 12px",
+  cursor: "pointer",
+  marginTop: 4,
 };
 const selectInput: React.CSSProperties = {
   boxSizing: "border-box",
