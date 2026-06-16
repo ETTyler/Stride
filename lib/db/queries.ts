@@ -150,13 +150,26 @@ export async function getWorkoutView(workoutId: number): Promise<WorkoutView | n
   };
 }
 
-/** The next workout that isn't finished — what "Today" should open. */
+/**
+ * The next workout that isn't finished — what "Today" should open.
+ * Ordered by the day's position in the plan (days.dayOrder), so reordering days
+ * is reflected here. (Previously this ordered by creation date, which ignored
+ * any later reordering.)
+ */
 export async function getNextWorkout(mesocycleId: number) {
   const [next] = await db
-    .select()
+    .select({
+      id: workouts.id,
+      mesocycleId: workouts.mesocycleId,
+      dayId: workouts.dayId,
+      weekNumber: workouts.weekNumber,
+      date: workouts.date,
+      status: workouts.status,
+    })
     .from(workouts)
+    .innerJoin(days, eq(days.id, workouts.dayId))
     .where(and(eq(workouts.mesocycleId, mesocycleId), inArray(workouts.status, ["upcoming", "in_progress"])))
-    .orderBy(asc(workouts.weekNumber), asc(workouts.date))
+    .orderBy(asc(workouts.weekNumber), asc(days.dayOrder))
     .limit(1);
   return next ?? null;
 }
