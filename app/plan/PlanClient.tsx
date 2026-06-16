@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   createMesocycle,
   addDay,
+  moveDay,
   addExerciseToDay,
   removeExerciseFromDay,
   changeExercise,
@@ -300,11 +301,43 @@ function MesoBuilder({
 
       {/* days */}
       <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-        {plan.days.map((day) => (
+        {plan.days.map((day, dayIdx) => (
           <div key={day.id} style={card}>
-            <h3 style={{ margin: "0 0 10px", fontFamily: SERIF, fontSize: 18, fontWeight: 800 }}>
-              {day.label}
-            </h3>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                margin: "0 0 10px",
+              }}
+            >
+              <h3 style={{ margin: 0, fontFamily: SERIF, fontSize: 18, fontWeight: 800 }}>
+                {day.label}
+              </h3>
+              {plan.days.length > 1 && (
+                <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                  <button
+                    onClick={() => run(() => moveDay({ dayId: day.id, direction: "up" }))}
+                    disabled={pending || dayIdx === 0}
+                    aria-label={`Move ${day.label} up`}
+                    title="Move up"
+                    style={{ ...moveBtn, opacity: dayIdx === 0 ? 0.3 : 1 }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    onClick={() => run(() => moveDay({ dayId: day.id, direction: "down" }))}
+                    disabled={pending || dayIdx === plan.days.length - 1}
+                    aria-label={`Move ${day.label} down`}
+                    title="Move down"
+                    style={{ ...moveBtn, opacity: dayIdx === plan.days.length - 1 ? 0.3 : 1 }}
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
+            </div>
 
             {day.exercises.length === 0 ? (
               <p style={{ color: CHALK_DIM, fontSize: 13, margin: "0 0 10px" }}>
@@ -835,6 +868,18 @@ const swapLink: React.CSSProperties = {
   letterSpacing: "0.04em",
   cursor: "pointer",
   padding: 0,
+};
+const moveBtn: React.CSSProperties = {
+  width: 30,
+  height: 30,
+  display: "grid",
+  placeItems: "center",
+  background: "transparent",
+  color: CHALK,
+  border: `1px solid ${LINE}`,
+  borderRadius: 4,
+  fontSize: 14,
+  cursor: "pointer",
 };
 const dangerBtn: React.CSSProperties = {
   padding: "13px 18px",

@@ -71,6 +71,41 @@ export async function addDay(input: {
   return { ok: true, dayId: day.id };
 }
 
+/**
+ * Move a day up or down in the plan by swapping its dayOrder with the adjacent
+ * day. Works on a running meso too — "Today" follows dayOrder, so the change is
+ * reflected immediately.
+ */
+export async function moveDay(input: {
+  dayId: number;
+  direction: "up" | "down";
+}): Promise<Result> {
+  const [day] = await db.select().from(days).where(eq(days.id, input.dayId)).limit(1);
+  if (!day) return { ok: false, error: "Day not found." };
+
+  // all days in this meso, in order
+  const siblings = await db
+    .select()
+    .from(days)
+    .where(eq(days.mesocycleId, day.mesocycleId))
+    .orderBy(asc(days.dayOrder));
+
+  const idx = siblings.findIndex((d) => d.id === day.id);
+  const swapIdx = input.direction === "up" ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= siblings.length) return { ok: true }; // already at the edge
+
+  const other = siblings[swapIdx];
+
+  // swap their order values
+  await db.update(days).set({ dayOrder: other.dayOrder }).where(eq(days.id, day.id));
+  await db.update(days).set({ dayOrder: day.dayOrder }).where(eq(days.id, other.id));
+
+  revalidatePath("/plan");
+  revalidatePath("/workout");
+  revalidatePath("/");
+  return { ok: true };
+}
+
 export async function addExerciseToDay(input: {
   dayId: number;
   exerciseId: number;
