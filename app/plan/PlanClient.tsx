@@ -548,11 +548,11 @@ function AddExercisePicker({
             Nothing in your library yet — add a new exercise.
           </p>
         ) : (
-          <div style={{ display: "flex", gap: 8 }}>
+          <div>
             <select
               value={sel}
               onChange={(e) => setSel(e.target.value === "" ? "" : Number(e.target.value))}
-              style={{ ...input, flex: 1 }}
+              style={{ ...input, width: "100%" }}
               disabled={pending}
             >
               <option value="">Choose an exercise…</option>
@@ -562,22 +562,30 @@ function AddExercisePicker({
                 </option>
               ))}
             </select>
-            <input
-              inputMode="numeric"
-              value={goal}
-              onChange={(e) => setGoal(e.target.value)}
-              placeholder="Sets"
-              aria-label="Goal working sets (optional)"
-              title="Goal working sets — leave blank to auto-set"
-              style={{ ...input, width: 64, flex: "none", textAlign: "center" }}
-              disabled={pending}
-            />
+
+            <label style={{ ...lbl, marginTop: 12 }}>Sets per session (optional)</label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                inputMode="numeric"
+                value={goal}
+                onChange={(e) => setGoal(e.target.value)}
+                placeholder="Auto"
+                aria-label="Sets per session (optional)"
+                style={{ ...input, width: 90, flex: "none", textAlign: "center" }}
+                disabled={pending}
+              />
+              <span style={{ fontSize: 12, color: CHALK_DIM, lineHeight: 1.4 }}>
+                How many sets you&apos;ll do each time you train this exercise. Leave blank to let
+                the app set &amp; auto-adjust it from your recovery.
+              </span>
+            </div>
+
             <button
               onClick={addExisting}
               disabled={pending || sel === ""}
-              style={{ ...ghostBtn, width: "auto", padding: "10px 16px" }}
+              style={{ ...primaryBtn, marginTop: 12, padding: "11px 0" }}
             >
-              Add
+              Add to day
             </button>
           </div>
         )
@@ -644,22 +652,26 @@ function AddExercisePicker({
               />
             </div>
             <div>
-              <label style={lbl}>Goal sets</label>
+              <label style={lbl}>Sets (opt.)</label>
               <input
                 inputMode="numeric"
                 value={goal}
                 onChange={(e) => setGoal(e.target.value)}
-                placeholder="auto"
-                title="Goal working sets — leave blank to auto-set"
+                placeholder="Auto"
+                title="Sets per session — leave blank to auto-set"
                 style={input}
                 disabled={pending}
               />
             </div>
           </div>
+          <p style={{ fontSize: 12, color: CHALK_DIM, margin: "8px 0 0", lineHeight: 1.4 }}>
+            Sets is optional — it&apos;s how many you&apos;ll do each session. Leave it
+            &ldquo;Auto&rdquo; to let the app set &amp; adjust it from recovery feedback.
+          </p>
           <button
             onClick={addNew}
             disabled={pending || !name.trim() || primaryId === ""}
-            style={{ ...primaryBtn, marginTop: 2, padding: "11px 0" }}
+            style={{ ...primaryBtn, marginTop: 10, padding: "11px 0" }}
           >
             {pending ? "Adding…" : "Create & add to day"}
           </button>

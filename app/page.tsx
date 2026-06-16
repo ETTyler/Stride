@@ -1,7 +1,13 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { getActiveMeso, getMesoWeekStatus, getNextWorkout } from "@/lib/db/queries";
+import {
+  getActiveMeso,
+  getMesoWeekStatus,
+  getNextWorkout,
+  getWeeklyVolumeByMuscle,
+  type MuscleVolume,
+} from "@/lib/db/queries";
 import AdvanceWeekButton from "./components/AdvanceWeekButton";
 import {
   ACCENT,
@@ -9,6 +15,7 @@ import {
   CHALK_DIM,
   GREEN,
   LINE,
+  RED,
   SERIF,
   SLATE,
   SLATE_RAISED,
@@ -49,6 +56,9 @@ export default async function Home() {
 async function ActiveDashboard({ mesoId, mesoName, userId }: { mesoId: number; mesoName: string; userId: string }) {
   const status = await getMesoWeekStatus(mesoId, userId);
   const next = await getNextWorkout(mesoId);
+  const volume = status.weeksGenerated
+    ? await getWeeklyVolumeByMuscle(mesoId, status.weeksGenerated, userId)
+    : [];
 
   return (
     <>
@@ -112,15 +122,77 @@ async function ActiveDashboard({ mesoId, mesoName, userId }: { mesoId: number; m
         </div>
       )}
 
+      {volume.length > 0 && <VolumeOverview volume={volume} week={status.weeksGenerated} />}
+
       <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
         <Link href="/plan" style={secondaryLink}>
           Edit plan
         </Link>
-        <Link href="/library" style={secondaryLink}>
-          Exercise library
+        <Link href="/history" style={secondaryLink}>
+          History
         </Link>
       </div>
     </>
+  );
+}
+
+/**
+ * Weekly volume per muscle group vs. its MEV/MAV/MRV landmarks. The bar fills to
+ * MRV; a marker shows MEV. Colour: dim below MEV, accent in the productive zone,
+ * red once at/over MRV.
+ */
+function VolumeOverview({ volume, week }: { volume: MuscleVolume[]; week: number }) {
+  return (
+    <div style={{ ...card, marginTop: 24 }}>
+      <div style={{ ...eyebrow, marginBottom: 14 }}>Week {week} volume by muscle</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {volume.map((m) => {
+          const pct = Math.min(100, (m.sets / m.mrv) * 100);
+          const mevPct = Math.min(100, (m.mev / m.mrv) * 100);
+          const color = m.sets >= m.mrv ? RED : m.sets < m.mev ? CHALK_DIM : ACCENT;
+          return (
+            <div key={m.muscleGroupId}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                <span style={{ fontWeight: 600 }}>{m.name}</span>
+                <span style={{ color: CHALK_DIM }}>
+                  {m.sets} {m.sets === 1 ? "set" : "sets"} · {m.exercises}{" "}
+                  {m.exercises === 1 ? "exercise" : "exercises"}
+                </span>
+              </div>
+              <div style={{ position: "relative", height: 6, background: LINE, borderRadius: 3 }}>
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: `${pct}%`,
+                    background: color,
+                    borderRadius: 3,
+                  }}
+                />
+                {/* MEV marker */}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${mevPct}%`,
+                    top: -2,
+                    height: 10,
+                    width: 2,
+                    background: CHALK,
+                    opacity: 0.5,
+                  }}
+                  title={`MEV ${m.mev}`}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 11, color: CHALK_DIM, marginTop: 12, lineHeight: 1.5 }}>
+        Bar fills toward MRV (max recoverable); the tick marks MEV (minimum effective). A set
+        counts as 1 for the exercise&apos;s primary muscle and ½ for each secondary muscle it
+        works — so totals can land on a half.
+      </div>
+    </div>
   );
 }
 

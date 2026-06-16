@@ -159,6 +159,72 @@ export async function saveFeedback(input: {
   return { ok: true };
 }
 
+/**
+ * Save all recovery feedback for a workout AND finish it, in one server action.
+ * Doing it together avoids firing many concurrent actions from the client (which
+ * was racing revalidations and failing the page refresh).
+ */
+export async function completeWorkout(input: {
+  workoutId: number;
+  feedback: {
+    muscleGroupId: number;
+    pump: number;
+    soreness: number;
+    jointPain: number;
+    workload: "easy" | "moderate" | "hard" | "too_much";
+  }[];
+}): Promise<ActionResult> {
+  const session = await auth();
+  if (!session?.user?.id) return { ok: false, error: "Not authenticated" };
+
+  const clamp03 = (n: number) => Math.max(0, Math.min(3, Math.round(n)));
+
+  for (const fb of input.feedback) {
+    const existing = await db
+      .select()
+      .from(feedback)
+      .where(
+        and(eq(feedback.workoutId, input.workoutId), eq(feedback.muscleGroupId, fb.muscleGroupId))
+      )
+      .limit(1);
+
+    const values = {
+      workoutId: input.workoutId,
+      muscleGroupId: fb.muscleGroupId,
+      pump: clamp03(fb.pump),
+      soreness: clamp03(fb.soreness),
+      jointPain: clamp03(fb.jointPain),
+      workload: fb.workload,
+    };
+
+    if (existing.length) {
+      await db.update(feedback).set(values).where(eq(feedback.id, existing[0].id));
+    } else {
+      await db.insert(feedback).values(values);
+    }
+  }
+
+  const [w] = await db
+    .update(workouts)
+    .set({ status: "done" })
+    .where(eq(workouts.id, input.workoutId))
+    .returning();
+
+  if (w) {
+    const status = await getMesoWeekStatus(w.mesocycleId, session.user.id);
+    if (status.mesoComplete) {
+      await db
+        .update(mesocycles)
+        .set({ status: "complete" })
+        .where(eq(mesocycles.id, w.mesocycleId));
+    }
+  }
+
+  revalidatePath("/workout");
+  revalidatePath("/");
+  return { ok: true };
+}
+
 /** Mark a workout complete; if it was the meso's final session, close the meso. */
 export async function finishWorkout(input: { workoutId: number }): Promise<ActionResult> {
   const session = await auth();

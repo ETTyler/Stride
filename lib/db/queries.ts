@@ -444,3 +444,195 @@ export async function getMuscleSetCounts(mesocycleId: number, weekNumber: number
   }
   return counts;
 }
+
+export type MuscleVolume = {
+  muscleGroupId: number;
+  name: string;
+  category: string;
+  sets: number; // planned weekly sets (primary 1, secondary 0.5)
+  exercises: number; // distinct exercises hitting it as primary
+  mev: number;
+  mav: number;
+  mrv: number;
+};
+
+/**
+ * Planned weekly volume per muscle group for a given week of a meso: how many
+ * sets and exercises hit each muscle, alongside its MEV/MAV/MRV landmarks.
+ */
+export async function getWeeklyVolumeByMuscle(
+  mesocycleId: number,
+  weekNumber: number,
+  user_id: string
+): Promise<MuscleVolume[]> {
+  const [meso] = await db
+    .select()
+    .from(mesocycles)
+    .where(and(eq(mesocycles.id, mesocycleId), eq(mesocycles.userId, user_id)))
+    .limit(1);
+  if (!meso) return [];
+
+  const rows = await db
+    .select({
+      muscleGroupId: exerciseMuscles.muscleGroupId,
+      role: exerciseMuscles.role,
+      dayExerciseId: setLogs.dayExerciseId,
+    })
+    .from(setLogs)
+    .innerJoin(workouts, eq(workouts.id, setLogs.workoutId))
+    .innerJoin(dayExercises, eq(dayExercises.id, setLogs.dayExerciseId))
+    .innerJoin(exerciseMuscles, eq(exerciseMuscles.exerciseId, dayExercises.exerciseId))
+    .where(and(eq(workouts.mesocycleId, mesocycleId), eq(workouts.weekNumber, weekNumber)));
+
+  const muscles = await db.select().from(muscleGroups);
+  const byId = new Map(muscles.map((m) => [m.id, m]));
+
+  const agg = new Map<number, { sets: number; exercises: Set<number> }>();
+  for (const r of rows) {
+    const a = agg.get(r.muscleGroupId) ?? { sets: 0, exercises: new Set<number>() };
+    a.sets += r.role === "PRIMARY" ? 1 : 0.5;
+    if (r.role === "PRIMARY") a.exercises.add(r.dayExerciseId);
+    agg.set(r.muscleGroupId, a);
+  }
+
+  const out: MuscleVolume[] = [];
+  for (const [mid, a] of agg) {
+    const m = byId.get(mid);
+    if (!m) continue;
+    out.push({
+      muscleGroupId: mid,
+      name: m.name,
+      category: m.category,
+      sets: a.sets,
+      exercises: a.exercises.size,
+      mev: m.mev,
+      mav: m.mav,
+      mrv: m.mrv,
+    });
+  }
+  out.sort((x, y) => x.name.localeCompare(y.name));
+  return out;
+}
+
+export type WorkoutHistoryItem = {
+  workoutId: number;
+  date: Date | null;
+  dayLabel: string;
+  mesoName: string;
+  weekNumber: number;
+  setsDone: number;
+};
+
+/** The user's completed workouts, newest first, with a count of logged sets. */
+export async function getWorkoutHistory(
+  user_id: string,
+  limit = 60
+): Promise<WorkoutHistoryItem[]> {
+  const rows = await db
+    .select({
+      workoutId: workouts.id,
+      date: workouts.date,
+      dayLabel: days.label,
+      mesoName: mesocycles.name,
+      weekNumber: workouts.weekNumber,
+    })
+    .from(workouts)
+    .innerJoin(mesocycles, eq(mesocycles.id, workouts.mesocycleId))
+    .innerJoin(days, eq(days.id, workouts.dayId))
+    .where(and(eq(mesocycles.userId, user_id), eq(workouts.status, "done")))
+    .orderBy(desc(workouts.date))
+    .limit(limit);
+
+  const ids = rows.map((r) => r.workoutId);
+  const counts = new Map<number, number>();
+  if (ids.length) {
+    const cs = await db
+      .select({ workoutId: setLogs.workoutId, id: setLogs.id })
+      .from(setLogs)
+      .where(and(inArray(setLogs.workoutId, ids), eq(setLogs.completed, true)));
+    for (const c of cs) counts.set(c.workoutId, (counts.get(c.workoutId) ?? 0) + 1);
+  }
+
+  return rows.map((r) => ({ ...r, setsDone: counts.get(r.workoutId) ?? 0 }));
+}
+
+export type HistorySet = {
+  setNumber: number;
+  weight: number | null;
+  reps: number | null;
+  completed: boolean;
+};
+export type HistoryExercise = {
+  dayExerciseId: number;
+  name: string;
+  primaryMuscle: string | null;
+  sets: HistorySet[];
+};
+export type WorkoutHistoryDetailed = WorkoutHistoryItem & { exercises: HistoryExercise[] };
+
+/** Workout history with each session's exercises and logged sets, for dropdowns. */
+export async function getWorkoutHistoryDetailed(
+  user_id: string,
+  limit = 60
+): Promise<WorkoutHistoryDetailed[]> {
+  const base = await getWorkoutHistory(user_id, limit);
+  const ids = base.map((b) => b.workoutId);
+  if (!ids.length) return base.map((b) => ({ ...b, exercises: [] }));
+
+  const rows = await db
+    .select({
+      workoutId: setLogs.workoutId,
+      dayExerciseId: setLogs.dayExerciseId,
+      exerciseId: exercises.id,
+      name: exercises.name,
+      setNumber: setLogs.setNumber,
+      weight: setLogs.weight,
+      reps: setLogs.reps,
+      completed: setLogs.completed,
+    })
+    .from(setLogs)
+    .innerJoin(dayExercises, eq(dayExercises.id, setLogs.dayExerciseId))
+    .innerJoin(exercises, eq(exercises.id, dayExercises.exerciseId))
+    .where(inArray(setLogs.workoutId, ids))
+    .orderBy(asc(dayExercises.exerciseOrder), asc(setLogs.setNumber));
+
+  const exIds = [...new Set(rows.map((r) => r.exerciseId))];
+  const prim = exIds.length
+    ? await db
+        .select({ exerciseId: exerciseMuscles.exerciseId, muscle: muscleGroups.name })
+        .from(exerciseMuscles)
+        .innerJoin(muscleGroups, eq(muscleGroups.id, exerciseMuscles.muscleGroupId))
+        .where(and(inArray(exerciseMuscles.exerciseId, exIds), eq(exerciseMuscles.role, "PRIMARY")))
+    : [];
+  const primById = new Map(prim.map((p) => [p.exerciseId, p.muscle]));
+
+  const byWorkout = new Map<number, Map<number, HistoryExercise>>();
+  for (const r of rows) {
+    let exMap = byWorkout.get(r.workoutId);
+    if (!exMap) {
+      exMap = new Map();
+      byWorkout.set(r.workoutId, exMap);
+    }
+    let ex = exMap.get(r.dayExerciseId);
+    if (!ex) {
+      ex = {
+        dayExerciseId: r.dayExerciseId,
+        name: r.name,
+        primaryMuscle: primById.get(r.exerciseId) ?? null,
+        sets: [],
+      };
+      exMap.set(r.dayExerciseId, ex);
+    }
+    ex.sets.push({
+      setNumber: r.setNumber,
+      weight: r.weight,
+      reps: r.reps,
+      completed: r.completed,
+    });
+  }
+
+  return base.map((b) => ({
+    ...b,
+    exercises: [...(byWorkout.get(b.workoutId)?.values() ?? [])],
+  }));
+}

@@ -1,14 +1,14 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useTransition } from "react";
-import type { WorkoutView } from "@/lib/db/queries";
+import { useRouter } from "next/navigation";
+import type { WorkoutView, WorkoutExerciseView } from "@/lib/db/queries";
 import {
   logSet,
   addSet,
   skipSet,
-  saveFeedback,
-  finishWorkout,
   endWorkout,
+  completeWorkout,
 } from "@/lib/actions/workout";
 import { addExerciseToDay, changeExercise } from "@/lib/actions/plan";
 
@@ -44,8 +44,21 @@ export default function TodaysWorkout({
   musclesToday: Muscle[];
   library: LibExercise[];
 }) {
+  const router = useRouter();
   const [swapFor, setSwapFor] = useState<number | null>(null); // dayExerciseId being swapped
   const [addingExercise, setAddingExercise] = useState(false);
+
+  // Local, optimistic copy of the day's exercises so taps feel instant and a
+  // slow server round-trip can't make a completed set visibly flicker off.
+  // Re-syncs whenever fresh server data arrives — done during render (React's
+  // recommended pattern) rather than in an effect.
+  const [exercises, setExercises] = useState<WorkoutExerciseView[]>(view.exercises);
+  const [syncedView, setSyncedView] = useState(view);
+  if (syncedView !== view) {
+    setSyncedView(view);
+    setExercises(view.exercises);
+  }
+
   const [draft, setDraft] = useState<Record<number, { weight: string; reps: string }>>(() => {
     const d: Record<number, { weight: string; reps: string }> = {};
     for (const ex of view.exercises)
@@ -60,16 +73,74 @@ export default function TodaysWorkout({
   const [showFeedback, setShowFeedback] = useState(false);
   const [pending, startTransition] = useTransition();
 
-  const allSets = view.exercises.flatMap((e) => e.sets);
+  const allSets = exercises.flatMap((e) => e.sets);
   const doneCount = allSets.filter((s) => s.completed).length;
   const totalCount = allSets.length;
   const allDone = doneCount === totalCount && totalCount > 0;
 
+  // For structural actions (add set / add exercise / swap / end). These re-sync
+  // from the server via the effect above once they revalidate.
   function run(fn: () => Promise<{ ok: boolean; error?: string }>) {
     setError(null);
     startTransition(async () => {
       const res = await fn();
       if (!res.ok) setError(res.error ?? "Something went wrong.");
+    });
+  }
+
+  // Optimistic: flip a set's completion immediately, persist in the background.
+  function toggleSet(setLogId: number, nextCompleted: boolean, weight: string, reps: string) {
+    setError(null);
+    setExercises((prev) =>
+      prev.map((ex) => ({
+        ...ex,
+        sets: ex.sets.map((s) =>
+          s.setLogId === setLogId ? { ...s, completed: nextCompleted } : s
+        ),
+      }))
+    );
+    startTransition(async () => {
+      const res = await logSet({ setLogId, weight, reps, completed: nextCompleted });
+      if (!res.ok) {
+        setError(res.error ?? "Couldn't save that set.");
+        router.refresh(); // revert to server truth
+      }
+    });
+  }
+
+  // Optimistic: remove a set immediately, persist in the background.
+  function removeSet(setLogId: number) {
+    setError(null);
+    setExercises((prev) =>
+      prev.map((ex) => ({ ...ex, sets: ex.sets.filter((s) => s.setLogId !== setLogId) }))
+    );
+    startTransition(async () => {
+      const res = await skipSet({ setLogId });
+      if (!res.ok) {
+        setError(res.error ?? "Couldn't remove that set.");
+        router.refresh(); // restore on failure
+      }
+    });
+  }
+
+  // Save all recovery feedback + finish, in one action (no concurrent calls).
+  function submitFeedback(
+    items: {
+      muscleGroupId: number;
+      pump: number;
+      soreness: number;
+      jointPain: number;
+      workload: "easy" | "moderate" | "hard" | "too_much";
+    }[]
+  ) {
+    setError(null);
+    startTransition(async () => {
+      const res = await completeWorkout({ workoutId: view.workoutId, feedback: items });
+      if (!res.ok) setError(res.error ?? "Couldn't save feedback.");
+      else {
+        setShowFeedback(false);
+        router.refresh();
+      }
     });
   }
 
@@ -146,7 +217,7 @@ export default function TodaysWorkout({
       )}
 
       <main style={{ padding: "8px 16px 0" }}>
-        {view.exercises.map((ex, exIdx) => (
+        {exercises.map((ex, exIdx) => (
           <section
             key={ex.dayExerciseId}
             style={{
@@ -214,7 +285,7 @@ export default function TodaysWorkout({
               <span />
             </div>
 
-            {ex.sets.map((s) => {
+            {ex.sets.map((s, i) => {
               const d = draft[s.setLogId] ?? { weight: "", reps: "" };
               return (
                 <div
@@ -224,12 +295,12 @@ export default function TodaysWorkout({
                     opacity: s.completed ? 0.55 : 1,
                   }}
                 >
-                  <span style={setNum}>{s.setNumber}</span>
+                  {/* number by position so it always reads 1, 2, 3… even after a delete */}
+                  <span style={setNum}>{i + 1}</span>
                   <input
                     inputMode="decimal"
                     placeholder={s.targetWeight != null ? String(s.targetWeight) : "—"}
                     value={d.weight}
-                    disabled={pending}
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, [s.setLogId]: { ...d, weight: e.target.value } }))
                     }
@@ -239,25 +310,14 @@ export default function TodaysWorkout({
                     inputMode="numeric"
                     placeholder={s.targetReps != null ? String(s.targetReps) : "—"}
                     value={d.reps}
-                    disabled={pending}
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, [s.setLogId]: { ...d, reps: e.target.value } }))
                     }
                     style={cellInput}
                   />
                   <button
-                    disabled={pending}
                     aria-label={s.completed ? "Mark set not done" : "Mark set done"}
-                    onClick={() =>
-                      run(() =>
-                        logSet({
-                          setLogId: s.setLogId,
-                          weight: d.weight,
-                          reps: d.reps,
-                          completed: !s.completed,
-                        })
-                      )
-                    }
+                    onClick={() => toggleSet(s.setLogId, !s.completed, d.weight, d.reps)}
                     style={{
                       ...checkBtn,
                       border: `1.5px solid ${s.completed ? GREEN : LINE}`,
@@ -268,10 +328,10 @@ export default function TodaysWorkout({
                     ✓
                   </button>
                   <button
-                    disabled={pending || s.completed}
+                    disabled={s.completed}
                     aria-label="Skip set"
                     title="Skip this set"
-                    onClick={() => run(() => skipSet({ setLogId: s.setLogId }))}
+                    onClick={() => removeSet(s.setLogId)}
                     style={{ ...skipBtn, opacity: s.completed ? 0.25 : 1 }}
                   >
                     ✕
@@ -335,12 +395,10 @@ export default function TodaysWorkout({
 
       {showFeedback && (
         <FeedbackSheet
-          workoutId={view.workoutId}
           muscles={musclesToday}
           pending={pending}
           onClose={() => setShowFeedback(false)}
-          onSaveOne={(payload) => run(() => saveFeedback(payload))}
-          onFinish={() => run(() => finishWorkout({ workoutId: view.workoutId }))}
+          onSubmit={submitFeedback}
         />
       )}
 
@@ -352,48 +410,46 @@ export default function TodaysWorkout({
 /* ---------------- feedback sheet ---------------- */
 
 function FeedbackSheet({
-  workoutId,
   muscles,
   pending,
   onClose,
-  onSaveOne,
-  onFinish,
+  onSubmit,
 }: {
-  workoutId: number;
   muscles: Muscle[];
   pending: boolean;
   onClose: () => void;
-  onSaveOne: (p: {
-    workoutId: number;
-    muscleGroupId: number;
-    pump: number;
-    soreness: number;
-    jointPain: number;
-    workload: "easy" | "moderate" | "hard" | "too_much";
-  }) => void;
-  onFinish: () => void;
+  onSubmit: (
+    items: {
+      muscleGroupId: number;
+      pump: number;
+      soreness: number;
+      jointPain: number;
+      workload: "easy" | "moderate" | "hard" | "too_much";
+    }[]
+  ) => void;
 }) {
   const [state, setState] = useState<
     Record<number, { pump: number; soreness: number; jointPain: number; workload: string }>
   >(() => {
-    const s: Record<number, any> = {};
+    const s: Record<number, { pump: number; soreness: number; jointPain: number; workload: string }> =
+      {};
     for (const m of muscles) s[m.id] = { pump: 2, soreness: 1, jointPain: 0, workload: "moderate" };
     return s;
   });
 
   function saveAll() {
-    for (const m of muscles) {
-      const v = state[m.id];
-      onSaveOne({
-        workoutId,
-        muscleGroupId: m.id,
-        pump: v.pump,
-        soreness: v.soreness,
-        jointPain: v.jointPain,
-        workload: v.workload as any,
-      });
-    }
-    onFinish();
+    onSubmit(
+      muscles.map((m) => {
+        const v = state[m.id];
+        return {
+          muscleGroupId: m.id,
+          pump: v.pump,
+          soreness: v.soreness,
+          jointPain: v.jointPain,
+          workload: v.workload as "easy" | "moderate" | "hard" | "too_much",
+        };
+      })
+    );
   }
 
   return (
@@ -401,7 +457,7 @@ function FeedbackSheet({
       <div style={sheet}>
         <h3 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 800 }}>How did it feel?</h3>
         <p style={{ margin: "0 0 16px", fontSize: 13, color: CHALK_DIM }}>
-          Your answers set next week's volume. Be honest — this is the autoregulation.
+          Your answers set next week&apos;s volume. Be honest — this is the autoregulation.
         </p>
 
         {muscles.map((m) => {
@@ -513,20 +569,90 @@ function Choice({
 
 /* ---------------- rest timer ---------------- */
 
-function RestTimer() {
-  const [seconds, setSeconds] = useState(0);
-  const [running, setRunning] = useState(false);
-  const ref = useRef<ReturnType<typeof setInterval> | null>(null);
+/**
+ * Rest timer. Elapsed time is derived from a stored start timestamp rather than
+ * an incrementing counter, so it stays correct even when the phone locks or the
+ * tab is backgrounded (mobile browsers throttle/suspend timers). The state is
+ * persisted to localStorage so it survives leaving the page and coming back.
+ */
+const REST_BASE = "stride.rest.base";
+const REST_RUNNING = "stride.rest.running";
+const REST_FROZEN = "stride.rest.frozen";
 
+function RestTimer() {
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0); // seconds
+  const baseRef = useRef<number | null>(null); // ms timestamp the count is measured from
+
+  // restore any in-progress timer on mount (client only — reads localStorage)
   useEffect(() => {
-    if (running) ref.current = setInterval(() => setSeconds((s) => s + 1), 1000);
+    const restore = () => {
+      try {
+        const wasRunning = localStorage.getItem(REST_RUNNING) === "1";
+        const base = Number(localStorage.getItem(REST_BASE) || 0);
+        const frozen = Number(localStorage.getItem(REST_FROZEN) || 0);
+        if (wasRunning && base > 0) {
+          baseRef.current = base;
+          setRunning(true);
+          setElapsed(Math.max(0, Math.floor((Date.now() - base) / 1000)));
+        } else {
+          setElapsed(frozen);
+        }
+      } catch {}
+    };
+    restore();
+  }, []);
+
+  // keep ticking, and re-sync whenever the tab becomes visible again
+  useEffect(() => {
+    if (!running) return;
+    const tick = () => {
+      if (baseRef.current != null)
+        setElapsed(Math.max(0, Math.floor((Date.now() - baseRef.current) / 1000)));
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
     return () => {
-      if (ref.current) clearInterval(ref.current);
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
     };
   }, [running]);
 
-  const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
-  const ss = String(seconds % 60).padStart(2, "0");
+  function start() {
+    const base = Date.now() - elapsed * 1000; // resume from current elapsed
+    baseRef.current = base;
+    try {
+      localStorage.setItem(REST_BASE, String(base));
+      localStorage.setItem(REST_RUNNING, "1");
+    } catch {}
+    setRunning(true);
+  }
+  function pause() {
+    setRunning(false);
+    try {
+      localStorage.setItem(REST_RUNNING, "0");
+      localStorage.setItem(REST_FROZEN, String(elapsed));
+    } catch {}
+  }
+  function reset() {
+    setRunning(false);
+    setElapsed(0);
+    baseRef.current = null;
+    try {
+      localStorage.removeItem(REST_BASE);
+      localStorage.setItem(REST_RUNNING, "0");
+      localStorage.setItem(REST_FROZEN, "0");
+    } catch {}
+  }
+
+  const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
+  const ss = String(elapsed % 60).padStart(2, "0");
 
   return (
     <div style={timerBar}>
@@ -542,14 +668,19 @@ function RestTimer() {
       >
         {mm}:{ss}
       </div>
-      <button onClick={() => setRunning((r) => !r)} style={{ ...timerBtn, background: running ? "transparent" : ACCENT, color: running ? CHALK : SLATE, border: running ? `1.5px solid ${LINE}` : "none" }}>
+      <button
+        onClick={() => (running ? pause() : start())}
+        style={{
+          ...timerBtn,
+          background: running ? "transparent" : ACCENT,
+          color: running ? CHALK : SLATE,
+          border: running ? `1.5px solid ${LINE}` : "none",
+        }}
+      >
         {running ? "Pause rest" : "Start rest"}
       </button>
       <button
-        onClick={() => {
-          setRunning(false);
-          setSeconds(0);
-        }}
+        onClick={reset}
         style={{ ...timerBtn, flex: "none", padding: "13px 16px", background: "transparent", color: CHALK_DIM, border: `1.5px solid ${LINE}` }}
       >
         Reset
@@ -669,7 +800,7 @@ const selectInput: React.CSSProperties = {
 };
 const ghostBtn: React.CSSProperties = {
   flex: 1,
-  padding: "10px 0",
+  padding: "10px 5px",
   background: "transparent",
   color: CHALK_DIM,
   border: `1px solid ${LINE}`,
