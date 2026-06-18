@@ -7,7 +7,6 @@ import {
   logSet,
   addSet,
   skipSet,
-  endWorkout,
   completeWorkout,
 } from "@/lib/actions/workout";
 import { addExerciseToDay, changeExercise } from "@/lib/actions/plan";
@@ -168,23 +167,7 @@ export default function TodaysWorkout({
           Week {view.weekNumber} of {view.totalWeeks}
           {view.exercises[0]?.targetRir != null && ` · ${view.exercises[0].targetRir} RIR target`}
         </div>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
-          <h1 style={pageTitle}>{view.dayLabel}</h1>
-          <button
-            onClick={() => {
-              if (
-                confirm(
-                  "End this workout and move to the next day? Any unlogged sets will be cleared and this session marked done."
-                )
-              )
-                run(() => endWorkout({ workoutId: view.workoutId }));
-            }}
-            disabled={pending}
-            style={endBtn}
-          >
-            End workout
-          </button>
-        </div>
+        <h1 style={pageTitle}>{view.dayLabel}</h1>
         <div style={{ marginTop: 14, height: 4, background: LINE }}>
           <div
             style={{
@@ -386,10 +369,18 @@ export default function TodaysWorkout({
           )}
         </div>
 
-        {allDone && !showFeedback && (
-          <button onClick={() => setShowFeedback(true)} style={finishBtn} disabled={pending}>
-            Finish & log recovery
-          </button>
+        {totalCount > 0 && !showFeedback && (
+          <>
+            <button onClick={() => setShowFeedback(true)} style={finishBtn} disabled={pending}>
+              Finish &amp; log recovery
+            </button>
+            {!allDone && (
+              <p style={{ fontSize: 12, color: CHALK_DIM, textAlign: "center", marginTop: 8 }}>
+                Finish the day anytime — {doneCount}/{totalCount} sets logged. Whatever you&apos;ve
+                completed is kept; the rest is just left unlogged.
+              </p>
+            )}
+          </>
         )}
       </main>
 
@@ -774,20 +765,6 @@ const linkBtn: React.CSSProperties = {
   letterSpacing: "0.04em",
   cursor: "pointer",
   padding: 0,
-};
-const endBtn: React.CSSProperties = {
-  flexShrink: 0,
-  background: "transparent",
-  border: `1px solid ${RED}`,
-  color: RED,
-  fontSize: 11,
-  fontWeight: 700,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
-  borderRadius: 4,
-  padding: "7px 12px",
-  cursor: "pointer",
-  marginTop: 4,
 };
 const selectInput: React.CSSProperties = {
   boxSizing: "border-box",

@@ -10,7 +10,7 @@ import {
   feedback,
   mesocycles,
 } from "@/db/schema";
-import { and, eq, desc, asc, inArray } from "drizzle-orm";
+import { and, eq, desc, asc, inArray, sql } from "drizzle-orm";
 
 /**
  * Read-side queries. These shape DB rows into the structures the UI and the
@@ -545,6 +545,7 @@ export async function getWorkoutHistory(
     .select({
       workoutId: workouts.id,
       date: workouts.date,
+      completedAt: workouts.completedAt,
       dayLabel: days.label,
       mesoName: mesocycles.name,
       weekNumber: workouts.weekNumber,
@@ -553,7 +554,9 @@ export async function getWorkoutHistory(
     .innerJoin(mesocycles, eq(mesocycles.id, workouts.mesocycleId))
     .innerJoin(days, eq(days.id, workouts.dayId))
     .where(and(eq(mesocycles.userId, user_id), eq(workouts.status, "done")))
-    .orderBy(desc(workouts.date))
+    // newest finished first; fall back to generation date for older rows
+    // that predate completedAt being recorded
+    .orderBy(sql`coalesce(${workouts.completedAt}, ${workouts.date}) desc`)
     .limit(limit);
 
   const ids = rows.map((r) => r.workoutId);
@@ -566,7 +569,11 @@ export async function getWorkoutHistory(
     for (const c of cs) counts.set(c.workoutId, (counts.get(c.workoutId) ?? 0) + 1);
   }
 
-  return rows.map((r) => ({ ...r, setsDone: counts.get(r.workoutId) ?? 0 }));
+  return rows.map(({ completedAt, ...r }) => ({
+    ...r,
+    date: completedAt ?? r.date, // show the completion time when we have it
+    setsDone: counts.get(r.workoutId) ?? 0,
+  }));
 }
 
 export type HistorySet = {

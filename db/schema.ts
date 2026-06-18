@@ -158,7 +158,8 @@ export const workouts = pgTable("workouts", {
     .notNull()
     .references(() => days.id),
   weekNumber: integer("week_number").notNull(),
-  date: timestamp("date").defaultNow(),
+  date: timestamp("date").defaultNow(), // when the workout was generated
+  completedAt: timestamp("completed_at"), // when it was finished/ended (null = not done)
   status: workoutStatus("status").notNull().default("upcoming"),
 });
 

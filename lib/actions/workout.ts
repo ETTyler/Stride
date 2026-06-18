@@ -206,7 +206,7 @@ export async function completeWorkout(input: {
 
   const [w] = await db
     .update(workouts)
-    .set({ status: "done" })
+    .set({ status: "done", completedAt: new Date() })
     .where(eq(workouts.id, input.workoutId))
     .returning();
 
@@ -233,40 +233,7 @@ export async function finishWorkout(input: { workoutId: number }): Promise<Actio
   }
 
   const [w] = await db.update(workouts)
-    .set({ status: "done" })
-    .where(eq(workouts.id, input.workoutId))
-    .returning();
-
-  if (w) {
-    const status = await getMesoWeekStatus(w.mesocycleId, session.user.id);
-    if (status.mesoComplete) {
-      await db
-        .update(mesocycles)
-        .set({ status: "complete" })
-        .where(eq(mesocycles.id, w.mesocycleId));
-    }
-  }
-
-  revalidatePath("/workout");
-  revalidatePath("/");
-  return { ok: true };
-}
-
-/**
- * End the current session early. Marks every set in the workout incomplete and
- * marks the workout done, so the queue advances to the next day. Nothing here
- * feeds progression (only completed sets do), so it's effectively a skip.
- */
-export async function endWorkout(input: { workoutId: number }): Promise<ActionResult> {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return { ok: false, error: "Not authenticated" };
-  }
-
-  await db.update(setLogs).set({ completed: false }).where(eq(setLogs.workoutId, input.workoutId));
-
-  const [w] = await db.update(workouts)
-    .set({ status: "done" })
+    .set({ status: "done", completedAt: new Date() })
     .where(eq(workouts.id, input.workoutId))
     .returning();
 
