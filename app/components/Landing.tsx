@@ -126,9 +126,9 @@ function PlanPreview() {
 }
 
 const WORKOUT_SETS = [
-  { w: "185", r: "8", target: "8–10 @ 2 RIR", done: true },
-  { w: "185", r: "8", target: "8–10 @ 2 RIR", done: true },
-  { w: "185", r: "7", target: "8–10 @ 2 RIR", done: true },
+  { w: "90", r: "8", target: "8–10 @ 2 RIR", done: true },
+  { w: "90", r: "8", target: "8–10 @ 2 RIR", done: true },
+  { w: "90", r: "7", target: "8–10 @ 2 RIR", done: true },
   { w: "", r: "", target: "8–10 @ 2 RIR", done: false },
 ];
 
@@ -147,7 +147,7 @@ function WorkoutPreview() {
             </span>
             <div style={setCell}>
               <span style={setVal}>{s.w || "—"}</span>
-              <span style={setUnit}>lb</span>
+              <span style={setUnit}>kg</span>
             </div>
             <span style={{ color: CHALK_DIM }}>×</span>
             <div style={setCell}>
