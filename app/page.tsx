@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import {
   getActiveMeso,
@@ -9,6 +8,7 @@ import {
   type MuscleVolume,
 } from "@/lib/db/queries";
 import AdvanceWeekButton from "./components/AdvanceWeekButton";
+import Landing from "./components/Landing";
 import {
   ACCENT,
   CHALK,
@@ -30,7 +30,7 @@ export const dynamic = "force-dynamic";
 export default async function Home() {
   const session = await auth();
   if (!session?.user?.id) {
-    redirect("/auth/signin");
+    return <Landing />;
   }
 
   const meso = await getActiveMeso(session.user.id);
