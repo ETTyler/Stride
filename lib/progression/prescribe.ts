@@ -26,6 +26,13 @@ export interface PrescribeResult extends SetPrescription {
   reasons: string[];
   /** true when the muscle has reached MRV — caller should plan a deload */
   recommendDeloadSoon: boolean;
+  /**
+   * Signed change in working sets the autoregulation called for this muscle
+   * (+1 add a set, 0 hold, -1 drop a set). `sets` is the muscle's *weekly*
+   * target; this is the per-session nudge the generator applies to each
+   * exercise's own set count. 0 on a deload week.
+   */
+  volumeSetChange: number;
 }
 
 /**
@@ -56,6 +63,7 @@ export function prescribe(input: PrescribeInput): PrescribeResult {
       targetRir,
       reasons: ["Deload week — volume halved and effort dialled back to recover."],
       recommendDeloadSoon: false,
+      volumeSetChange: 0,
     };
   }
 
@@ -69,5 +77,6 @@ export function prescribe(input: PrescribeInput): PrescribeResult {
     targetRir,
     reasons: [vol.decision.reason, load.reason],
     recommendDeloadSoon: vol.atCeiling,
+    volumeSetChange: vol.decision.setChange,
   };
 }

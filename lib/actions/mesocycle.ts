@@ -19,6 +19,7 @@ import {
   getLastWeekSets,
   getLatestFeedbackByMuscle,
   getMuscleSetCounts,
+  getExerciseSetCountsForWeek,
   getMesoWeekStatus,
   getLastWeightByExercise,
 } from "@/lib/db/queries";
@@ -38,6 +39,9 @@ import {
 type GenResult = { ok: true; workoutsCreated: number } | { ok: false; error: string };
 
 const DEFAULT_STARTING_SETS = 3; // per exercise in week 1
+// sane per-exercise working-set band the autoregulation moves within
+const MIN_EXERCISE_SETS = 2;
+const MAX_EXERCISE_SETS = 6;
 
 /** Build week 1 of a meso: one workout per day, prescribed sets at a sane start. */
 export async function generateFirstWeek(mesocycleId: number): Promise<GenResult> {
@@ -306,6 +310,8 @@ export async function generateNextWeek(
   );
   const prevSetCounts = await getMuscleSetCounts(mesocycleId, prevWeek);
   const feedbackByMuscle = await getLatestFeedbackByMuscle(mesocycleId, prevWeek);
+  // how many sets each exercise was programmed last week — the base we adjust
+  const prevExerciseSetCounts = await getExerciseSetCountsForWeek(mesocycleId, prevWeek);
 
   const dayRows = await db
     .select()
@@ -316,6 +322,27 @@ export async function generateNextWeek(
   let created = 0;
   let deloadFlagged = false;
 
+  const isDeload = isDeloadWeek(targetWeek, meso.weeks);
+
+  // ---- Pass 1: prescribe every exercise across the whole week. We gather
+  // everything first (rather than writing day-by-day) so volume changes can be
+  // applied at the MUSCLE level: at most one set is added to (or removed from)
+  // a muscle per week, RP-style, instead of nudging every exercise that hits it.
+  type PlanEntry = {
+    dayId: number;
+    dxId: number;
+    muscleId: number | undefined;
+    goalSets: number | null;
+    prevSets: number;
+    dayOrder: number;
+    exerciseOrder: number;
+    result: ReturnType<typeof prescribe>;
+  };
+  const plan: PlanEntry[] = [];
+  // muscleId -> the set change autoregulation called for this week (+1 / 0 / -1).
+  // Same for every exercise on a muscle (it's driven by that muscle's feedback).
+  const muscleSetChange = new Map<number, number>();
+
   for (const day of dayRows) {
     const lastWeekSets = await getLastWeekSets(mesocycleId, day.id, prevWeek);
 
@@ -323,6 +350,7 @@ export async function generateNextWeek(
       .select({
         id: dayExercises.id,
         exerciseId: dayExercises.exerciseId,
+        order: dayExercises.exerciseOrder,
         goalSets: dayExercises.goalSets,
         repLow: exercises.repRangeLow,
         repHigh: exercises.repRangeHigh,
@@ -344,13 +372,6 @@ export async function generateNextWeek(
           )
       : [];
     const primaryMuscleByExercise = new Map(prim.map((p) => [p.exerciseId, p.muscleId]));
-
-    const [workout] = await db
-      .insert(workouts)
-      .values({ mesocycleId, dayId: day.id, weekNumber: targetWeek, status: "upcoming" })
-      .returning();
-
-    const setRows: (typeof setLogs.$inferInsert)[] = [];
 
     for (const dx of dxRows) {
       const muscleId = primaryMuscleByExercise.get(dx.exerciseId);
@@ -384,28 +405,113 @@ export async function generateNextWeek(
       });
 
       if (result.recommendDeloadSoon) deloadFlagged = true;
+      if (muscleId != null) muscleSetChange.set(muscleId, result.volumeSetChange);
 
-      // If the user set a goal number of working sets for this exercise, honor
-      // it (halved on the deload week). Otherwise fall back to the algorithm.
-      let setsForExercise: number;
-      if (dx.goalSets != null) {
-        const goal = Math.max(1, Math.min(dx.goalSets, 10));
-        setsForExercise = isDeloadWeek(targetWeek, meso.weeks)
-          ? Math.max(1, Math.round(goal / 2))
-          : goal;
-      } else {
-        // engine returns weekly sets for the MUSCLE; this exercise gets its share.
-        setsForExercise = Math.max(1, result.sets > 0 ? Math.min(result.sets, 5) : 3);
-      }
+      plan.push({
+        dayId: day.id,
+        dxId: dx.id,
+        muscleId,
+        goalSets: dx.goalSets,
+        prevSets: prevExerciseSetCounts.get(dx.id) ?? DEFAULT_STARTING_SETS,
+        dayOrder: day.dayOrder,
+        exerciseOrder: dx.order,
+        result,
+      });
+    }
+  }
 
+  // ---- Pass 2: decide each exercise's working-set count for the week.
+  //
+  // Base case carries over what the exercise was already programmed (clamped to
+  // a sane band); deload halves it; a user-fixed goal is honoured as-is.
+  const setsByDx = new Map<number, number>();
+  for (const e of plan) {
+    let sets: number;
+    if (e.goalSets != null) {
+      const goal = Math.max(1, Math.min(e.goalSets, 10));
+      sets = isDeload ? Math.max(1, Math.round(goal / 2)) : goal;
+    } else if (isDeload) {
+      sets = Math.max(1, Math.round(e.prevSets / 2));
+    } else {
+      sets = Math.max(MIN_EXERCISE_SETS, Math.min(MAX_EXERCISE_SETS, e.prevSets));
+    }
+    setsByDx.set(e.dxId, sets);
+  }
+
+  // Then apply the autoregulation change at the MUSCLE level: on a working week,
+  // add (or drop) a single set for the muscle, given to just one of its
+  // exercises — the one with the most room. Only auto exercises are eligible;
+  // user-fixed goal sets are left alone.
+  if (!isDeload) {
+    const byMuscle = new Map<number, PlanEntry[]>();
+    for (const e of plan) {
+      if (e.muscleId == null || e.goalSets != null) continue;
+      const arr = byMuscle.get(e.muscleId) ?? [];
+      arr.push(e);
+      byMuscle.set(e.muscleId, arr);
+    }
+
+    for (const [muscleId, entries] of byMuscle) {
+      const change = muscleSetChange.get(muscleId) ?? 0;
+      if (change === 0) continue;
+
+      // deterministic, balanced pick: when adding, the exercise with the fewest
+      // sets (most room); when dropping, the one with the most sets. Ties break
+      // by day order, then position in the day, then id.
+      const eligible = entries.filter((e) => {
+        const cur = setsByDx.get(e.dxId)!;
+        return change > 0 ? cur < MAX_EXERCISE_SETS : cur > MIN_EXERCISE_SETS;
+      });
+      if (!eligible.length) continue;
+
+      eligible.sort((a, b) => {
+        const sa = setsByDx.get(a.dxId)!;
+        const sb = setsByDx.get(b.dxId)!;
+        if (sa !== sb) return change > 0 ? sa - sb : sb - sa;
+        if (a.dayOrder !== b.dayOrder) return a.dayOrder - b.dayOrder;
+        if (a.exerciseOrder !== b.exerciseOrder) return a.exerciseOrder - b.exerciseOrder;
+        return a.dxId - b.dxId;
+      });
+
+      const target = eligible[0];
+      const next = Math.max(
+        MIN_EXERCISE_SETS,
+        Math.min(MAX_EXERCISE_SETS, setsByDx.get(target.dxId)! + change)
+      );
+      setsByDx.set(target.dxId, next);
+    }
+  }
+
+  // ---- Pass 3: write a workout per day with the decided sets.
+  for (const day of dayRows) {
+    const entries = plan
+      .filter((e) => e.dayId === day.id)
+      .sort((a, b) => a.exerciseOrder - b.exerciseOrder);
+    if (!entries.length) {
+      // still create the (empty) workout so the week is structurally complete
+      await db
+        .insert(workouts)
+        .values({ mesocycleId, dayId: day.id, weekNumber: targetWeek, status: "upcoming" });
+      created++;
+      continue;
+    }
+
+    const [workout] = await db
+      .insert(workouts)
+      .values({ mesocycleId, dayId: day.id, weekNumber: targetWeek, status: "upcoming" })
+      .returning();
+
+    const setRows: (typeof setLogs.$inferInsert)[] = [];
+    for (const e of entries) {
+      const setsForExercise = setsByDx.get(e.dxId)!;
       for (let i = 0; i < setsForExercise; i++) {
         setRows.push({
           workoutId: workout.id,
-          dayExerciseId: dx.id,
+          dayExerciseId: e.dxId,
           setNumber: i + 1,
-          targetReps: result.targetRepsLow,
-          targetRir: result.targetRir,
-          targetWeight: result.targetWeight || null,
+          targetReps: e.result.targetRepsLow,
+          targetRir: e.result.targetRir,
+          targetWeight: e.result.targetWeight || null,
           completed: false,
         });
       }

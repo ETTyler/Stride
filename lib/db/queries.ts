@@ -428,6 +428,29 @@ export async function getLastWeightByExercise(
   return best;
 }
 
+/**
+ * Prescribed set count per dayExercise for a given week of a meso, keyed by
+ * dayExerciseId. Counts every planned set (not just completed ones) so the
+ * next week carries over the volume that was *programmed* — a skipped set
+ * shouldn't quietly ratchet an exercise down.
+ */
+export async function getExerciseSetCountsForWeek(
+  mesocycleId: number,
+  weekNumber: number
+): Promise<Map<number, number>> {
+  const rows = await db
+    .select({ dayExerciseId: setLogs.dayExerciseId })
+    .from(setLogs)
+    .innerJoin(workouts, eq(workouts.id, setLogs.workoutId))
+    .where(and(eq(workouts.mesocycleId, mesocycleId), eq(workouts.weekNumber, weekNumber)));
+
+  const counts = new Map<number, number>();
+  for (const r of rows) {
+    counts.set(r.dayExerciseId, (counts.get(r.dayExerciseId) ?? 0) + 1);
+  }
+  return counts;
+}
+
 /** Count of completed working sets per muscle group for a given week. */
 export async function getMuscleSetCounts(mesocycleId: number, weekNumber: number) {
   // pull completed sets in the week, join to the exercise's PRIMARY muscle
