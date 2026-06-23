@@ -163,6 +163,57 @@ export async function advanceWeek(mesocycleId: number): Promise<GenResult> {
 }
 
 /**
+ * Rebuild an already-generated week from scratch — used to re-run the
+ * progression after a plan or algorithm change. Only allowed on a week that
+ * hasn't been logged yet: if any set in it is already completed, we refuse so
+ * the user can never lose recorded training. The week is re-derived from the
+ * PREVIOUS week's logs + recovery, exactly like a normal advance.
+ */
+export async function regenerateWeek(mesocycleId: number, week: number): Promise<GenResult> {
+  const session = await auth();
+  if (!session?.user?.id) return { ok: false, error: "Not authenticated" };
+
+  const [meso] = await db
+    .select()
+    .from(mesocycles)
+    .where(and(eq(mesocycles.id, mesocycleId), eq(mesocycles.userId, session.user.id)))
+    .limit(1);
+  if (!meso) return { ok: false, error: "Mesocycle not found." };
+  if (week < 2) return { ok: false, error: "Week 1 is your starting point and can't be regenerated." };
+
+  const weekWorkouts = await db
+    .select({ id: workouts.id })
+    .from(workouts)
+    .where(and(eq(workouts.mesocycleId, mesocycleId), eq(workouts.weekNumber, week)));
+  if (!weekWorkouts.length) return { ok: false, error: `Week ${week} hasn't been generated yet.` };
+
+  // Protect logged data: never wipe a week the user has started logging.
+  const workoutIds = weekWorkouts.map((w) => w.id);
+  const [loggedSet] = await db
+    .select({ id: setLogs.id })
+    .from(setLogs)
+    .where(and(inArray(setLogs.workoutId, workoutIds), eq(setLogs.completed, true)))
+    .limit(1);
+  if (loggedSet) {
+    return {
+      ok: false,
+      error: `Week ${week} already has logged sets, so it can't be regenerated without losing them.`,
+    };
+  }
+
+  // Drop the week's workouts (cascade removes their set logs) and rebuild it.
+  await db
+    .delete(workouts)
+    .where(and(eq(workouts.mesocycleId, mesocycleId), eq(workouts.weekNumber, week)));
+
+  const res = await generateNextWeek(mesocycleId, week);
+  revalidatePath("/");
+  revalidatePath("/workout");
+  revalidatePath("/plan");
+  return res;
+}
+
+/**
  * Set a meso's status explicitly. The user marks a meso complete here (or
  * reactivates one). Activating is blocked if another meso is already active.
  */

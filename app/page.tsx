@@ -8,6 +8,7 @@ import {
   type MuscleVolume,
 } from "@/lib/db/queries";
 import AdvanceWeekButton from "./components/AdvanceWeekButton";
+import RegenerateWeekButton from "./components/RegenerateWeekButton";
 import Landing from "./components/Landing";
 import {
   ACCENT,
@@ -59,6 +60,16 @@ async function ActiveDashboard({ mesoId, mesoName, userId }: { mesoId: number; m
   const volume = status.weeksGenerated
     ? await getWeeklyVolumeByMuscle(mesoId, status.weeksGenerated, userId)
     : [];
+
+  // Offer to rebuild the current week when it's a generated week (>= 2) that
+  // hasn't been logged yet — lets the latest progression apply to a week that
+  // was created before a plan/algorithm change.
+  const currentWeek = next?.weekNumber ?? null;
+  const currentPerWeek = currentWeek
+    ? status.perWeek.find((w) => w.week === currentWeek)
+    : null;
+  const canRegenerate =
+    currentWeek != null && currentWeek >= 2 && !!currentPerWeek && currentPerWeek.done === 0;
 
   return (
     <>
@@ -120,6 +131,10 @@ async function ActiveDashboard({ mesoId, mesoName, userId }: { mesoId: number; m
             to set up your next block.
           </p>
         </div>
+      )}
+
+      {canRegenerate && currentWeek != null && (
+        <RegenerateWeekButton mesocycleId={mesoId} week={currentWeek} />
       )}
 
       {volume.length > 0 && <VolumeOverview volume={volume} week={status.weeksGenerated} />}
